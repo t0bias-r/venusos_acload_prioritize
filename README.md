@@ -1,7 +1,7 @@
 # Victron Venus OS: Prioritize AC load over battery charge
 Victron Venus OS addon: Prioritize AC load over over LiFePO4 charge for ESS Status Reason Code #1.
 
-The script is used in an ESS mode 1 environment where the PV power is mainly used for the AC loads (=household) and to charge the battery. The battery delivers the power for the AC loads during the night.
+The script is used in an [ESS mode 1](https://www.victronenergy.com/live/ess:ess_mode_2_and_3) environment where the PV power is mainly used for the AC loads (=household) and to charge the battery. The battery delivers the power for the AC loads during the night.
 
 On cloudy days with almost no sun, all PV power is directly needed by the AC loads.
 
