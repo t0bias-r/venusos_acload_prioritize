@@ -1,8 +1,7 @@
 #!/usr/bin/env python
 
 """
-Victron Venus OS addon: Prioritize AC load over battery charge in ESS mode 1 when the batteries are empty.
-https://github.com/t0bias-r/venusos_acload_prioritize
+Victron Venus OS addon: Prioritize AC load over LiFePO4 charge for ESS Status Reason Code #1.
 """
 import gobject
 import platform
@@ -31,7 +30,7 @@ class PeridocTask:
         try:
             self.dbusConn = dbus.SessionBus() if 'DBUS_SESSION_BUS_ADDRESS' in os.environ else dbus.SystemBus()
             
-            self._max_discharge_power = 3000
+            self._max_discharge_power = 1000
             self._soc_distance        = 5
             self._soc_distance_full   = 10
             
