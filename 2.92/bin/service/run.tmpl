@@ -1,0 +1,5 @@
+#!/bin/sh
+echo "*** starting dbus-acload-prioritize ***"
+BASE=${BASE}
+exec 2>&1
+HOME=$BASE exec $BASE/dbus_acload_prioritize.py
