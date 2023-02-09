@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import dbus.service
@@ -6,6 +6,7 @@ import logging
 import traceback
 import os
 import weakref
+from collections import defaultdict
 from ve_utils import wrap_dbus_value, unwrap_dbus_value
 
 # vedbus contains three classes:
@@ -61,6 +62,8 @@ class VeDbusService(object):
 		# dict containing the VeDbusItemExport objects, with their path as the key.
 		self._dbusobjects = {}
 		self._dbusnodes = {}
+		self._ratelimiters = []
+		self._dbusname = None
 
 		# dict containing the onchange callbacks, for each object. Object path is the key
 		self._onchangecallbacks = {}
@@ -75,30 +78,17 @@ class VeDbusService(object):
 		self._dbusname = dbus.service.BusName(servicename, self._dbusconn, do_not_queue=True)
 
 		# Add the root item that will return all items as a tree
-		self._dbusnodes['/'] = self._create_tree_export(self._dbusconn, '/', self._get_tree_dict)
+		self._dbusnodes['/'] = VeDbusRootExport(self._dbusconn, '/', self)
 
 		logging.info("registered ourselves on D-Bus as %s" % servicename)
-
-	def _get_tree_dict(self, path, get_text=False):
-		logging.debug("_get_tree_dict called for %s" % path)
-		r = {}
-		px = path
-		if not px.endswith('/'):
-			px += '/'
-		for p, item in self._dbusobjects.items():
-			if p.startswith(px):
-				v = item.GetText() if get_text else wrap_dbus_value(item.local_get_value())
-				r[p[len(px):]] = v
-		logging.debug(r)
-		return r
 
 	# To force immediate deregistering of this dbus service and all its object paths, explicitly
 	# call __del__().
 	def __del__(self):
-		for node in self._dbusnodes.values():
+		for node in list(self._dbusnodes.values()):
 			node.__del__()
 		self._dbusnodes.clear()
-		for item in self._dbusobjects.values():
+		for item in list(self._dbusobjects.values()):
 			item.__del__()
 		self._dbusobjects.clear()
 		if self._dbusname:
@@ -109,20 +99,20 @@ class VeDbusService(object):
 	#							be the path of the object, second the new value. This callback should return
 	#							True to accept the change, False to reject it.
 	def add_path(self, path, value, description="", writeable=False,
-					onchangecallback=None, gettextcallback=None):
+					onchangecallback=None, gettextcallback=None, valuetype=None):
 
 		if onchangecallback is not None:
 			self._onchangecallbacks[path] = onchangecallback
 
 		item = VeDbusItemExport(
 				self._dbusconn, path, value, description, writeable,
-				self._value_changed, gettextcallback, deletecallback=self._item_deleted)
+				self._value_changed, gettextcallback, deletecallback=self._item_deleted, valuetype=valuetype)
 
 		spl = path.split('/')
 		for i in range(2, len(spl)):
 			subPath = '/'.join(spl[:i])
 			if subPath not in self._dbusnodes and subPath not in self._dbusobjects:
-				self._dbusnodes[subPath] = self._create_tree_export(self._dbusconn, subPath, self._get_tree_dict)
+				self._dbusnodes[subPath] = VeDbusTreeExport(self._dbusconn, subPath, self)
 		self._dbusobjects[path] = item
 		logging.debug('added %s with start value %s. Writeable is %s' % (path, value, writeable))
 
@@ -141,9 +131,6 @@ class VeDbusService(object):
 		self.add_path('/HardwareVersion', hardwareversion)
 		self.add_path('/Connected', connected)
 
-	def _create_tree_export(self, bus, objectPath, get_value_handler):
-		return VeDbusTreeExport(bus, objectPath, get_value_handler)
-
 	# Callback function that is called from the VeDbusItemExport objects when a value changes. This function
 	# maps the change-request to the onchangecallback given to us for this specific path.
 	def _value_changed(self, path, newvalue):
@@ -154,7 +141,7 @@ class VeDbusService(object):
 
 	def _item_deleted(self, path):
 		self._dbusobjects.pop(path)
-		for np in self._dbusnodes.keys():
+		for np in list(self._dbusnodes.keys()):
 			if np != '/':
 				for ip in self._dbusobjects:
 					if ip.startswith(np + '/'):
@@ -175,6 +162,76 @@ class VeDbusService(object):
 
 	def __contains__(self, path):
 		return path in self._dbusobjects
+
+	def __enter__(self):
+		l = ServiceContext(self)
+		self._ratelimiters.append(l)
+		return l
+
+	def __exit__(self, *exc):
+		# pop off the top one and flush it. If with statements are nested
+		# then each exit flushes its own part.
+		if self._ratelimiters:
+			self._ratelimiters.pop().flush()
+
+class ServiceContext(object):
+	def __init__(self, parent):
+		self.parent = parent
+		self.changes = {}
+
+	def __getitem__(self, path):
+		return self.parent[path]
+
+	def __setitem__(self, path, newvalue):
+		c = self.parent._dbusobjects[path]._local_set_value(newvalue)
+		if c is not None:
+			self.changes[path] = c
+
+	def flush(self):
+		if self.changes:
+			self.parent._dbusnodes['/'].ItemsChanged(self.changes)
+
+class TrackerDict(defaultdict):
+	""" Same as defaultdict, but passes the key to default_factory. """
+	def __missing__(self, key):
+		self[key] = x = self.default_factory(key)
+		return x
+
+class VeDbusRootTracker(object):
+	""" This tracks the root of a dbus path and listens for PropertiesChanged
+	    signals. When a signal arrives, parse it and unpack the key/value changes
+	    into traditional events, then pass it to the original eventCallback
+	    method. """
+	def __init__(self, bus, serviceName):
+		self.importers = defaultdict(weakref.WeakSet)
+		self.serviceName = serviceName
+		self._match = bus.get_object(serviceName, '/', introspect=False).connect_to_signal(
+			"ItemsChanged", weak_functor(self._items_changed_handler))
+
+	def __del__(self):
+		self._match.remove()
+		self._match = None
+
+	def add(self, i):
+		self.importers[i.path].add(i)
+
+	def _items_changed_handler(self, items):
+		if not isinstance(items, dict):
+			return
+
+		for path, changes in items.items():
+			try:
+				v = changes['Value']
+			except KeyError:
+				continue
+
+			try:
+				t = changes['Text']
+			except KeyError:
+				t = str(unwrap_dbus_value(v))
+
+			for i in self.importers.get(path, ()):
+				i._properties_changed_handler({'Value': v, 'Text': t})
 
 """
 Importing basics:
@@ -199,6 +256,16 @@ make sure to also subscribe to the NamerOwnerChanged signal on bus-level. Or jus
 because that takes care of all of that for you.
 """
 class VeDbusItemImport(object):
+	def __new__(cls, bus, serviceName, path, eventCallback=None, createsignal=True):
+		instance = object.__new__(cls)
+
+		# If signal tracking should be done, also add to root tracker
+		if createsignal:
+			if "_roots" not in cls.__dict__:
+				cls._roots = TrackerDict(lambda k: VeDbusRootTracker(bus, k))
+
+		return instance
+
 	## Constructor
 	# @param bus			the bus-object (SESSION or SYSTEM).
 	# @param serviceName	the dbus-service-name (string), for example 'com.victronenergy.battery.ttyO1'
@@ -221,6 +288,7 @@ class VeDbusItemImport(object):
 		if createsignal:
 			self._match = self._proxy.connect_to_signal(
 				"PropertiesChanged", weak_functor(self._properties_changed_handler))
+			self._roots[serviceName].add(self)
 
 		# store the current value in _cachedvalue. When it doesn't exists set _cachedvalue to
 		# None, same as when a value is invalid
@@ -233,7 +301,7 @@ class VeDbusItemImport(object):
 			self._cachedvalue = unwrap_dbus_value(v)
 
 	def __del__(self):
-		if self._match != None:
+		if self._match is not None:
 			self._match.remove()
 			self._match = None
 		self._proxy = None
@@ -322,9 +390,9 @@ class VeDbusItemImport(object):
 
 
 class VeDbusTreeExport(dbus.service.Object):
-	def __init__(self, bus, objectPath, get_value_handler):
+	def __init__(self, bus, objectPath, service):
 		dbus.service.Object.__init__(self, bus, objectPath)
-		self._get_value_handler = get_value_handler
+		self._service = service
 		logging.debug("VeDbusTreeExport %s has been created" % objectPath)
 
 	def __del__(self):
@@ -341,6 +409,19 @@ class VeDbusTreeExport(dbus.service.Object):
 			return None
 		return self._locations[0][1]
 
+	def _get_value_handler(self, path, get_text=False):
+		logging.debug("_get_value_handler called for %s" % path)
+		r = {}
+		px = path
+		if not px.endswith('/'):
+			px += '/'
+		for p, item in self._service._dbusobjects.items():
+			if p.startswith(px):
+				v = item.GetText() if get_text else wrap_dbus_value(item.local_get_value())
+				r[p[len(px):]] = v
+		logging.debug(r)
+		return r
+
 	@dbus.service.method('com.victronenergy.BusItem', out_signature='v')
 	def GetValue(self):
 		value = self._get_value_handler(self._get_path())
@@ -352,6 +433,20 @@ class VeDbusTreeExport(dbus.service.Object):
 
 	def local_get_value(self):
 		return self._get_value_handler(self.path)
+
+class VeDbusRootExport(VeDbusTreeExport):
+	@dbus.service.signal('com.victronenergy.BusItem', signature='a{sa{sv}}')
+	def ItemsChanged(self, changes):
+		pass
+
+	@dbus.service.method('com.victronenergy.BusItem', out_signature='a{sa{sv}}')
+	def GetItems(self):
+		return {
+			path: {
+				'Value': wrap_dbus_value(item.local_get_value()),
+				'Text': item.GetText() }
+			for path, item in self._service._dbusobjects.items()
+		}
 
 
 class VeDbusItemExport(dbus.service.Object):
@@ -368,7 +463,8 @@ class VeDbusItemExport(dbus.service.Object):
 	#                     over the dbus. First parameter passed to callback will be our path, second the new
 	#					  value. This callback should return True to accept the change, False to reject it.
 	def __init__(self, bus, objectPath, value=None, description=None, writeable=False,
-					onchangecallback=None, gettextcallback=None, deletecallback=None):
+					onchangecallback=None, gettextcallback=None, deletecallback=None,
+					valuetype=None):
 		dbus.service.Object.__init__(self, bus, objectPath)
 		self._onchangecallback = onchangecallback
 		self._gettextcallback = gettextcallback
@@ -376,6 +472,7 @@ class VeDbusItemExport(dbus.service.Object):
 		self._description = description
 		self._writeable = writeable
 		self._deletecallback = deletecallback
+		self._type = valuetype
 
 	# To force immediate deregistering of this dbus object, explicitly call __del__().
 	def __del__(self):
@@ -386,7 +483,6 @@ class VeDbusItemExport(dbus.service.Object):
 			return
 		if self._deletecallback is not None:
 			self._deletecallback(path)
-		self.local_set_value(None)
 		self.remove_from_connection()
 		logging.debug("VeDbusItemExport %s has been removed" % path)
 
@@ -400,15 +496,19 @@ class VeDbusItemExport(dbus.service.Object):
 	# is using this class to export values to the dbus.
 	# set value to None to indicate that it is Invalid
 	def local_set_value(self, newvalue):
+		changes = self._local_set_value(newvalue)
+		if changes is not None:
+			self.PropertiesChanged(changes)
+
+	def _local_set_value(self, newvalue):
 		if self._value == newvalue:
-			return
+			return None
 
 		self._value = newvalue
-
-		changes = {}
-		changes['Value'] = wrap_dbus_value(newvalue)
-		changes['Text'] = self.GetText()
-		self.PropertiesChanged(changes)
+		return {
+			'Value': wrap_dbus_value(newvalue),
+			'Text': self.GetText()
+		}
 
 	def local_get_value(self):
 		return self._value
@@ -426,6 +526,16 @@ class VeDbusItemExport(dbus.service.Object):
 			return 1  # NOT OK
 
 		newvalue = unwrap_dbus_value(newvalue)
+
+		# If value type is enforced, cast it. If the type can be coerced
+		# python will do it for us. This allows ints to become floats,
+		# or bools to become ints. Additionally also allow None, so that
+		# a path may be invalidated.
+		if self._type is not None and newvalue is not None:
+			try:
+				newvalue = self._type(newvalue)
+			except (ValueError, TypeError):
+				return 1 # NOT OK
 
 		if newvalue == self._value:
 			return 0  # OK

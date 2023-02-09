@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 """
 A class to put a simple service on the dbus, according to victron standards, with constantly updating
@@ -10,7 +10,7 @@ to the dummy data via the dbus. See example.
 
 https://github.com/victronenergy/dbus_vebus_to_pvinverter/tree/master/test
 """
-import gobject
+from gi.repository import GLib
 import platform
 import argparse
 import logging
@@ -21,7 +21,7 @@ import os
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), '../ext/velib_python'))
 from vedbus import VeDbusService
 
-class DbusDummyService:
+class DbusDummyService(object):
     def __init__(self, servicename, deviceinstance, paths, productname='Dummy product', connection='Dummy service'):
         self._dbusservice = VeDbusService(servicename)
         self._paths = paths
@@ -41,17 +41,22 @@ class DbusDummyService:
         self._dbusservice.add_path('/HardwareVersion', 0)
         self._dbusservice.add_path('/Connected', 1)
 
-        for path, settings in self._paths.iteritems():
+        for path, settings in self._paths.items():
             self._dbusservice.add_path(
                 path, settings['initial'], writeable=True, onchangecallback=self._handlechangedvalue)
 
-        gobject.timeout_add(1000, self._update)
+        GLib.timeout_add(1000, self._update)
 
     def _update(self):
-        for path, settings in self._paths.iteritems():
-            if 'update' in settings:
-                self._dbusservice[path] = self._dbusservice[path] + settings['update']
-                logging.debug("%s: %s" % (path, self._dbusservice[path]))
+        with self._dbusservice as s:
+            for path, settings in self._paths.items():
+                if 'update' in settings:
+                    update = settings['update']
+                    if callable(update):
+                        s[path] = update(path, s[path])
+                    else:
+                        s[path] += update
+                    logging.debug("%s: %s" % (path, s[path]))
         return True
 
     def _handlechangedvalue(self, path, value):
@@ -88,12 +93,10 @@ def main():
             '/DbusInvalid': {'initial': None}
         })
 
-    logging.info('Connected to dbus, and switching over to gobject.MainLoop() (= event based)')
-    mainloop = gobject.MainLoop()
+    logging.info('Connected to dbus, and switching over to GLib.MainLoop() (= event based)')
+    mainloop = GLib.MainLoop()
     mainloop.run()
 
 
 if __name__ == "__main__":
     main()
-
-

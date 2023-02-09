@@ -1,5 +1,6 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+import sys
 from traceback import print_exc
 from os import _exit as os_exit
 from os import statvfs
@@ -14,16 +15,16 @@ class NoVrmPortalIdError(Exception):
 	pass
 
 # Use this function to make sure the code quits on an unexpected exception. Make sure to use it
-# when using gobject.idle_add and also gobject.timeout_add.
-# Without this, the code will just keep running, since gobject does not stop the mainloop on an
+# when using GLib.idle_add and also GLib.timeout_add.
+# Without this, the code will just keep running, since GLib does not stop the mainloop on an
 # exception.
-# Example: gobject.idle_add(exit_on_error, myfunc, arg1, arg2)
+# Example: GLib.idle_add(exit_on_error, myfunc, arg1, arg2)
 def exit_on_error(func, *args, **kwargs):
 	try:
 		return func(*args, **kwargs)
 	except:
 		try:
-			print 'exit_on_error: there was an exception. Printing stacktrace will be tried and then exit'
+			print ('exit_on_error: there was an exception. Printing stacktrace will be tried and then exit')
 			print_exc()
 		except:
 			pass
@@ -58,7 +59,7 @@ def get_vrm_portal_id():
 	# First try the method that works if we don't have a data partition. This
 	# will fail when the current user is not root.
 	try:
-		portal_id = check_output("/sbin/get-unique-id").strip()
+		portal_id = check_output("/sbin/get-unique-id").decode("utf-8", "ignore").strip()
 		if not portal_id:
 			raise NoVrmPortalIdError("get-unique-id returned blank")
 		__vrm_portal_id = portal_id
@@ -75,14 +76,14 @@ def get_vrm_portal_id():
 	# variable.
 	import fcntl, socket, struct, os
 
-	iface = os.environ.get('VRM_IFACE', 'eth0')
+	iface = os.environ.get('VRM_IFACE', 'eth0').encode('ascii')
 	s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 	try:
 		info = fcntl.ioctl(s.fileno(), 0x8927,  struct.pack('256s', iface[:15]))
 	except IOError:
 		raise NoVrmPortalIdError("ioctl failed for eth0")
 
-	__vrm_portal_id = ''.join(['%02x' % ord(char) for char in info[18:24]])
+	__vrm_portal_id = info[18:24].hex()
 	return __vrm_portal_id
 
 
@@ -126,15 +127,10 @@ def get_free_space(path):
 	try:
 		s = statvfs(path)
 		result = s.f_frsize * s.f_bavail     # Number of free bytes that ordinary users
-	except Exception, ex:
+	except Exception as ex:
 		logger.info("Error while retrieving free space for path %s: %s" % (path, ex))
 
 	return result
-
-
-def get_load_averages():
-	c = read_file('/proc/loadavg')
-	return c.split(' ')[:3]
 
 
 def _get_sysfs_machine_name():
@@ -151,7 +147,7 @@ def _get_sysfs_machine_name():
 def get_machine_name():
 	# First try calling the venus utility script
 	try:
-		return check_output("/usr/bin/product-name").strip()
+		return check_output("/usr/bin/product-name").strip().decode('UTF-8')
 	except (CalledProcessError, OSError):
 		pass
 
@@ -162,7 +158,7 @@ def get_machine_name():
 
 	# Fall back to venus build machine name
 	try:
-		with open('/etc/venus/machine', 'r') as f:
+		with open('/etc/venus/machine', 'r', encoding='UTF-8') as f:
 			return f.read().strip()
 	except IOError:
 		pass
@@ -175,7 +171,7 @@ def get_product_id():
 
 	# First try calling the venus utility script
 	try:
-		return check_output("/usr/bin/product-id").strip()
+		return check_output("/usr/bin/product-id").strip().decode('UTF-8')
 	except (CalledProcessError, OSError):
 		pass
 
@@ -186,7 +182,9 @@ def get_product_id():
 		'Venus GX': 'C002',
 		'Octo GX': 'C006',
 		'EasySolar-II': 'C007',
-		'MultiPlus-II': 'C008'
+		'MultiPlus-II': 'C008',
+		'Maxi GX': 'C009',
+		'Cerbo GX': 'C00A'
 	}.get(name, 'C003') # C003 is Generic
 
 
@@ -197,7 +195,7 @@ def read_file(path):
 	try:
 		with open(path, 'r') as f:
 			content = f.read().rstrip()
-	except Exception, ex:
+	except Exception as ex:
 		logger.debug("Error while reading %s: %s" % (path, ex))
 
 	return content
@@ -217,8 +215,6 @@ def wrap_dbus_value(value):
 			return dbus.Int64(value, variant_level=1)
 	if isinstance(value, str):
 		return dbus.String(value, variant_level=1)
-	if isinstance(value, unicode):
-		return dbus.String(value, variant_level=1)
 	if isinstance(value, list):
 		if len(value) == 0:
 			# If the list is empty we cannot infer the type of the contents. So assume unsigned integer.
@@ -226,8 +222,6 @@ def wrap_dbus_value(value):
 			# an invalid value.
 			return dbus.Array([], signature=dbus.Signature('u'), variant_level=1)
 		return dbus.Array([wrap_dbus_value(x) for x in value], variant_level=1)
-	if isinstance(value, long):
-		return dbus.Int64(value, variant_level=1)
 	if isinstance(value, dict):
 		# Wrapping the keys of the dictionary causes D-Bus errors like:
 		# 'arguments to dbus_message_iter_open_container() were incorrect,
@@ -252,12 +246,12 @@ def unwrap_dbus_value(val):
 		v = [unwrap_dbus_value(x) for x in val]
 		return None if len(v) == 0 else v
 	if isinstance(val, (dbus.Signature, dbus.String)):
-		return unicode(val)
+		return str(val)
 	# Python has no byte type, so we convert to an integer.
 	if isinstance(val, dbus.Byte):
 		return int(val)
 	if isinstance(val, dbus.ByteArray):
-		return "".join([str(x) for x in val])
+		return "".join([bytes(x) for x in val])
 	if isinstance(val, (list, tuple)):
 		return [unwrap_dbus_value(x) for x in val]
 	if isinstance(val, (dbus.Dictionary, dict)):
@@ -266,3 +260,17 @@ def unwrap_dbus_value(val):
 	if isinstance(val, dbus.Boolean):
 		return bool(val)
 	return val
+
+# When supported, only name owner changes for the the given namespace are reported. This
+# prevents spending cpu time at irrelevant changes, like scripts accessing the bus temporarily.
+def add_name_owner_changed_receiver(dbus, name_owner_changed, namespace="com.victronenergy"):
+	# support for arg0namespace is submitted upstream, but not included at the time of
+	# writing, Venus OS does support it, so try if it works.
+	if namespace is None:
+		dbus.add_signal_receiver(name_owner_changed, signal_name='NameOwnerChanged')
+	else:
+		try:
+			dbus.add_signal_receiver(name_owner_changed,
+				signal_name='NameOwnerChanged', arg0namespace=namespace)
+		except TypeError:
+			dbus.add_signal_receiver(name_owner_changed, signal_name='NameOwnerChanged')

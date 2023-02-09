@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 # This file has some tests, to do type checking of vedbus.py
@@ -43,12 +43,12 @@ dbusObjects['PyNegativeInt'] = VeDbusItemImport(dbusConn, 'com.victronenergy.exa
 if hasVEBus: dbusObjects['C_negativeInt'] = VeDbusItemImport(dbusConn, 'com.victronenergy.vebus.ttyO1', '/Dc/I')
 
 # print the results
-print '----'
+print('----')
 for key, o in dbusObjects.items():
-	print key + ' at ' + o.serviceName + o.path
+	print(key + ' at ' + o.serviceName + o.path)
 	pprint.pprint(dbusObjects[key])
-	print 'pprint veBusItem.get_value(): '
+	print('pprint veBusItem.get_value(): ')
 	pprint.pprint(dbusObjects[key].get_value())
-	print 'pprint veBusItem.get_text(): '
+	print('pprint veBusItem.get_text(): ')
 	pprint.pprint(dbusObjects[key].get_text())
-	print '----'
+	print('----')

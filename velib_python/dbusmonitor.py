@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 ## @package dbus_vrm
@@ -16,8 +16,7 @@
 # Code is used by the vrmLogger, and also the pubsub code. Both are other modules in the dbus_vrm repo.
 
 from dbus.mainloop.glib import DBusGMainLoop
-import gobject
-from gobject import idle_add
+from gi.repository import GLib
 import dbus
 import dbus.service
 import inspect
@@ -30,8 +29,7 @@ from collections import defaultdict
 from functools import partial
 
 # our own packages
-from vedbus import VeDbusItemExport, VeDbusItemImport
-from ve_utils import exit_on_error, wrap_dbus_value, unwrap_dbus_value
+from ve_utils import exit_on_error, wrap_dbus_value, unwrap_dbus_value, add_name_owner_changed_receiver
 notfound = object() # For lookups where None is a valid result
 
 logger = logging.getLogger(__name__)
@@ -56,8 +54,6 @@ class MonitoredValue(object):
 		return iter((self.value, self.text, self.options))
 
 class Service(object):
-	whentologoptions = ['configChange', 'onIntervalAlwaysAndOnEvent',
-		'onIntervalOnlyWhenChanged', 'onIntervalAlways', 'never']
 	def __init__(self, id, serviceName, deviceInstance):
 		super(Service, self).__init__()
 		self.id = id
@@ -65,12 +61,6 @@ class Service(object):
 		self.paths = {}
 		self._seen = set()
 		self.deviceInstance = deviceInstance
-
-		self.configChange = []
-		self.onIntervalAlwaysAndOnEvent = []
-		self.onIntervalOnlyWhenChanged = []
-		self.onIntervalAlways = []
-		self.never = []
 
 	# For legacy code, attributes can still be accessed as if keys from a
 	# dictionary.
@@ -92,7 +82,7 @@ class Service(object):
 class DbusMonitor(object):
 	## Constructor
 	def __init__(self, dbusTree, valueChangedCallback=None, deviceAddedCallback=None,
-					deviceRemovedCallback=None, vebusDeviceInstance0=False):
+					deviceRemovedCallback=None, namespace="com.victronenergy"):
 		# valueChangedCallback is the callback that we call when something has changed.
 		# def value_changed_on_dbus(dbusServiceName, dbusPath, options, changes, deviceInstance):
 		# in which changes is a tuple with GetText() and GetValue()
@@ -100,7 +90,6 @@ class DbusMonitor(object):
 		self.deviceAddedCallback = deviceAddedCallback
 		self.deviceRemovedCallback = deviceRemovedCallback
 		self.dbusTree = dbusTree
-		self.vebusDeviceInstance0 = vebusDeviceInstance0
 
 		# Lists all tracked services. Stores name, id, device instance, value per path, and whenToLog info
 		# indexed by service name (eg. com.victronenergy.settings).
@@ -120,15 +109,22 @@ class DbusMonitor(object):
 		self.dbusConn = SessionBus() if 'DBUS_SESSION_BUS_ADDRESS' in os.environ else SystemBus()
 
 		# subscribe to NameOwnerChange for bus connect / disconnect events.
-		(dbus.SessionBus() if 'DBUS_SESSION_BUS_ADDRESS' in os.environ \
-			else dbus.SystemBus()).add_signal_receiver(
-			self.dbus_name_owner_changed,
-			signal_name='NameOwnerChanged')
+		# NOTE: this is on a different bus then the one above!
+		standardBus = (dbus.SessionBus() if 'DBUS_SESSION_BUS_ADDRESS' in os.environ \
+			else dbus.SystemBus())
+
+		add_name_owner_changed_receiver(standardBus, self.dbus_name_owner_changed)
 
 		# Subscribe to PropertiesChanged for all services
 		self.dbusConn.add_signal_receiver(self.handler_value_changes,
 			dbus_interface='com.victronenergy.BusItem',
 			signal_name='PropertiesChanged', path_keyword='path',
+			sender_keyword='senderId')
+
+		# Subscribe to ItemsChanged for all services
+		self.dbusConn.add_signal_receiver(self.handler_item_changes,
+			dbus_interface='com.victronenergy.BusItem',
+			signal_name='ItemsChanged', path='/',
 			sender_keyword='senderId')
 
 		logger.info('===== Search on dbus for services that we will monitor starting... =====')
@@ -138,12 +134,21 @@ class DbusMonitor(object):
 
 		logger.info('===== Search on dbus for services that we will monitor finished =====')
 
+	@staticmethod
+	def make_service(serviceId, serviceName, deviceInstance):
+		""" Override this to use a different kind of service object. """
+		return Service(serviceId, serviceName, deviceInstance)
+
+	def make_monitor(self, service, path, value, text, options):
+		""" Override this to do more things with monitoring. """
+		return MonitoredValue(unwrap_dbus_value(value), unwrap_dbus_value(text), options)
+
 	def dbus_name_owner_changed(self, name, oldowner, newowner):
 		if not name.startswith("com.victronenergy."):
 			return
 
 		#decouple, and process in main loop
-		idle_add(exit_on_error, self._process_name_owner_changed, name, oldowner, newowner)
+		GLib.idle_add(exit_on_error, self._process_name_owner_changed, name, oldowner, newowner)
 
 	def _process_name_owner_changed(self, name, oldowner, newowner):
 		if newowner != '':
@@ -156,7 +161,6 @@ class DbusMonitor(object):
 			# it disappeared, we need to remove it.
 			logger.info("%s disappeared from the dbus. Removing it from our lists" % name)
 			service = self.servicesByName[name]
-			deviceInstance = service['deviceInstance']
 			del self.servicesById[service.id]
 			del self.servicesByName[name]
 			for watch in self.serviceWatches[name]:
@@ -164,7 +168,7 @@ class DbusMonitor(object):
 			del self.serviceWatches[name]
 			self.servicesByClass[service.service_class].remove(service)
 			if self.deviceRemovedCallback is not None:
-				self.deviceRemovedCallback(name, deviceInstance)
+				self.deviceRemovedCallback(name, service.deviceInstance)
 
 	def scan_dbus_service(self, serviceName):
 		try:
@@ -199,11 +203,7 @@ class DbusMonitor(object):
 		assert serviceName not in self.servicesByName
 		assert serviceId not in self.servicesById
 
-		# for vebus.ttyO1, this is workaround, since VRM Portal expects the main vebus
-		# devices at instance 0. Not sure how to fix this yet.
-		if serviceName == 'com.victronenergy.vebus.ttyO1' and self.vebusDeviceInstance0:
-			di = 0
-		elif serviceName == 'com.victronenergy.settings':
+		if serviceName == 'com.victronenergy.settings':
 			di = 0
 		elif serviceName.startswith('com.victronenergy.vecan.'):
 			di = 0
@@ -218,7 +218,7 @@ class DbusMonitor(object):
 				di = int(di)
 
 		logger.info("       %s has device instance %s" % (serviceName, di))
-		service = Service(serviceId, serviceName, di)
+		service = self.make_service(serviceId, serviceName, di)
 
 		# Let's try to fetch everything in one go
 		values = {}
@@ -229,11 +229,9 @@ class DbusMonitor(object):
 		except:
 			pass
 
-		for path, options in paths.iteritems():
+		for path, options in paths.items():
 			# path will be the D-Bus path: '/Ac/ActiveIn/L1/V'
 			# options will be a dictionary: {'code': 'V', 'whenToLog': 'onIntervalAlways'}
-			# check that the whenToLog setting is set to something we expect
-			assert options['whenToLog'] is None or options['whenToLog'] in Service.whentologoptions
 
 			# Try to obtain the value we want from our bulk fetch. If we
 			# cannot find it there, do an individual query.
@@ -258,10 +256,7 @@ class DbusMonitor(object):
 					value = None
 					text = None
 
-			service.paths[path] = MonitoredValue(unwrap_dbus_value(value), unwrap_dbus_value(text), options)
-
-			if options['whenToLog']:
-				service[options['whenToLog']].append(path)
+			service.paths[path] = self.make_monitor(service, path, unwrap_dbus_value(value), unwrap_dbus_value(text), options)
 
 
 		logger.debug("Finished scanning and storing items for %s" % serviceName)
@@ -274,36 +269,67 @@ class DbusMonitor(object):
 
 		return True
 
-	def handler_value_changes(self, changes, path, senderId):
-		try:
-			service = self.servicesById[senderId]
-			a = service.paths[path]
-		except KeyError:
-			# Either senderId or path isn't there, which means
-			# it hasn't been scanned yet.
+	def handler_item_changes(self, items, senderId):
+		if not isinstance(items, dict):
 			return
 
+		try:
+			service = self.servicesById[senderId]
+		except KeyError:
+			# senderId isn't there, which means it hasn't been scanned yet.
+			return
+
+		for path, changes in items.items():
+			try:
+				v = unwrap_dbus_value(changes['Value'])
+			except (KeyError, TypeError):
+				continue
+
+			try:
+				t = changes['Text']
+			except KeyError:
+				t = str(v)
+			self._handler_value_changes(service, path, v, t)
+
+	def handler_value_changes(self, changes, path, senderId):
 		# If this properyChange does not involve a value, our work is done.
 		if 'Value' not in changes:
+			return
+
+		try:
+			service = self.servicesById[senderId]
+		except KeyError:
+			# senderId isn't there, which means it hasn't been scanned yet.
+			return
+
+		v = unwrap_dbus_value(changes['Value'])
+		# Some services don't send Text with their PropertiesChanged events.
+		try:
+			t = changes['Text']
+		except KeyError:
+			t = str(v)
+		self._handler_value_changes(service, path, v, t)
+
+	def _handler_value_changes(self, service, path, value, text):
+		try:
+			a = service.paths[path]
+		except KeyError:
+			# path isn't there, which means it hasn't been scanned yet.
 			return
 
 		service.set_seen(path)
 
 		# First update our store to the new value
-		changes['Value'] = unwrap_dbus_value(changes['Value'])
-		if a.value == changes['Value']:
+		if a.value == value:
 			return
 
-		a.value = changes['Value']
-		try:
-			a.text = changes['Text']
-		except KeyError:
-			# Some services don't send Text with their PropertiesChanged events.
-			a.text = str(a.value)
+		a.value = value
+		a.text = text
 
 		# And do the rest of the processing in on the mainloop
 		if self.valueChangedCallback is not None:
-			idle_add(exit_on_error, self._execute_value_changes, service.name, path, changes, a.options)
+			GLib.idle_add(exit_on_error, self._execute_value_changes, service.name, path, {
+				'Value': value, 'Text': text}, a.options)
 
 	def _execute_value_changes(self, serviceName, objectPath, changes, options):
 		# double check that the service still exists, as it might have
@@ -394,7 +420,7 @@ class DbusMonitor(object):
 	def get_service_list(self, classfilter=None):
 		if classfilter is None:
 			return { servicename: service.deviceInstance \
-				for servicename, service in self.servicesByName.iteritems() }
+				for servicename, service in self.servicesByName.items() }
 
 		if classfilter not in self.servicesByClass:
 			return {}
@@ -405,55 +431,39 @@ class DbusMonitor(object):
 	def get_device_instance(self, serviceName):
 		return self.servicesByName[serviceName].deviceInstance
 
-	# Parameter categoryfilter is to be a list, containing the categories you want (configChange,
-	# onIntervalAlways, etc).
-	# Returns a dictionary, keys are codes + instance, in VRM querystring format. For example vvt[0]. And
-	# values are the value.
-	def get_values(self, categoryfilter, converter=None):
-
-		result = {}
-
-		for serviceName in self.servicesByName:
-			result.update(self.get_values_for_service(categoryfilter, serviceName, converter))
-
-		return result
-
-	# same as get_values above, but then for one service only
-	def get_values_for_service(self, categoryfilter, servicename, converter=None):
-		deviceInstance = self.get_device_instance(servicename)
-		result = {}
-
-		service = self.servicesByName[servicename]
-
-		for category in categoryfilter:
-
-			for path in service[category]:
-
-				value, text, options = service.paths[path]
-
-				if value is not None:
-
-					value = value if converter is None else converter.convert(path, options['code'], value, text)
-
-					precision = options.get('precision')
-					if precision:
-						value = round(value, precision)
-
-					result[options['code'] + "[" + str(deviceInstance) + "]"] = value
-
-		return result
-
 	def track_value(self, serviceName, objectPath, callback, *args, **kwargs):
 		""" A DbusMonitor can watch specific service/path combos for changes
 		    so that it is not fully reliant on the global handler_value_changes
 		    in this class. Additional watches are deleted automatically when
 		    the service disappears from dbus. """
-		self.serviceWatches[serviceName].append(
-			self.dbusConn.add_signal_receiver(
-				partial(callback, *args, **kwargs),
+		cb = partial(callback, *args, **kwargs)
+
+		def root_tracker(items):
+			# Check if objectPath in dict
+			try:
+				v = items[objectPath]
+				_v = unwrap_dbus_value(v['Value'])
+			except (KeyError, TypeError):
+				return # not in this dict
+
+			try:
+				t = v['Text']
+			except KeyError:
+				cb({'Value': _v })
+			else:
+				cb({'Value': _v, 'Text': t})
+
+		# Track changes on the path, and also on root
+		self.serviceWatches[serviceName].extend((
+			self.dbusConn.add_signal_receiver(cb,
 				dbus_interface='com.victronenergy.BusItem',
 				signal_name='PropertiesChanged',
-				path=objectPath, bus_name=serviceName))
+				path=objectPath, bus_name=serviceName),
+			self.dbusConn.add_signal_receiver(root_tracker,
+				dbus_interface='com.victronenergy.BusItem',
+				signal_name='ItemsChanged',
+				path="/", bus_name=serviceName),
+		))
 
 
 # ====== ALL CODE BELOW THIS LINE IS PURELY FOR DEVELOPING THIS CLASS ======
@@ -474,9 +484,9 @@ def nameownerchange(a, b):
 	import gc
 	gc.collect()
 	objects = gc.get_objects()
-	print len([o for o in objects if type(o).__name__ == 'VeDbusItemImport'])
-	print len([o for o in objects if type(o).__name__ == 'SignalMatch'])
-	print len(objects)
+	print (len([o for o in objects if type(o).__name__ == 'VeDbusItemImport']))
+	print (len([o for o in objects if type(o).__name__ == 'SignalMatch']))
+	print (len(objects))
 
 
 def print_values(dbusmonitor):
@@ -485,7 +495,7 @@ def print_values(dbusmonitor):
 	c = dbusmonitor.get_value('com.victronenergy.dummyservice.ttyO1', '/DbusInvalid', default_value=1000)
 	d = dbusmonitor.get_value('com.victronenergy.dummyservice.ttyO1', '/NonExistingButMonitored', default_value=1000)
 
-	print "All should be 1000: Wrong Service: %s, NotInTheMonitorList: %s, DbusInvalid: %s, NonExistingButMonitored: %s" % (a, b, c, d)
+	print ("All should be 1000: Wrong Service: %s, NotInTheMonitorList: %s, DbusInvalid: %s, NonExistingButMonitored: %s" % (a, b, c, d))
 	return True
 
 # We have a mainloop, but that is just for developing this code. Normally above class & code is used from
@@ -518,17 +528,11 @@ def main():
 	d = DbusMonitor(monitorlist, value_changed_on_dbus,
 		deviceAddedCallback=nameownerchange, deviceRemovedCallback=nameownerchange)
 
-	# logger.info("==configchange values==")
-	# logger.info(pprint.pformat(d.get_values(['configChange'])))
-
-	# logger.info("==onIntervalAlways and onIntervalOnlyWhenChanged==")
-	# logger.info(pprint.pformat(d.get_values(['onIntervalAlways', 'onIntervalAlwaysAndOnEvent'])))
-
-	gobject.timeout_add(1000, print_values, d)
+	GLib.timeout_add(1000, print_values, d)
 
 	# Start and run the mainloop
 	logger.info("Starting mainloop, responding on only events")
-	mainloop = gobject.MainLoop()
+	mainloop = GLib.MainLoop()
 	mainloop.run()
 
 if __name__ == "__main__":

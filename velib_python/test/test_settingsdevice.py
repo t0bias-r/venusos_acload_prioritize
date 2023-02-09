@@ -1,10 +1,9 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 # Python
 import logging
 import os
-import gobject
 import sqlite3
 import sys
 import unittest

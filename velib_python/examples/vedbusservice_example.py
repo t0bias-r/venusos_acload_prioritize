@@ -1,9 +1,8 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 from dbus.mainloop.glib import DBusGMainLoop
-import gobject
-from gobject import idle_add
+from gi.repository import GLib
 import dbus
 import dbus.service
 import inspect
@@ -27,7 +26,7 @@ def get_text_for_rpm(path, value):
 def main(argv):
 		global dbusObjects
 
-		print __file__ + " starting up"
+		print(__file__ + " starting up")
 
 		# Have a mainloop, so we can send/receive asynchronous calls to and from dbus
 		DBusGMainLoop(set_as_default=True)
@@ -61,7 +60,7 @@ def main(argv):
 		print('try changing our RPM by executing the following command from a terminal\n')
 		print('dbus-send --print-reply --dest=com.victronenergy.example /RPM com.victronenergy.BusItem.SetValue int32:1200')
 		print('Reply will be <> 0 for values > 1000: not accepted. And reply will be 0 for values < 1000: accepted.')
-		mainloop = gobject.MainLoop()
+		mainloop = GLib.MainLoop()
 		mainloop.run()
 
 main("")
