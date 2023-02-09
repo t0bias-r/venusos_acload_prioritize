@@ -1,19 +1,24 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 """
 Victron Venus OS addon: Prioritize AC load over battery charge in ESS mode 1 when the batteries are empty.
 https://github.com/t0bias-r/venusos_acload_prioritize
 """
-import gobject
+## @package conversions
+# takes data from the dbus, does calculations with it, and puts it back on
+from dbus.mainloop.glib import DBusGMainLoop
+from gi.repository import GLib
+import dbus
+import dbus.service
+import inspect
 import platform
+from threading import Timer
 import argparse
 import logging
 import sys, traceback
 import os
-import dbus
 import socket
 import threading
-import time
 from os import _exit as os_exit
 from contextlib import closing
 from datetime import datetime, timedelta
@@ -59,7 +64,7 @@ class PeridocTask:
                 self._this_discharge_power = 0
             
             
-            gobject.timeout_add(1000, self.timeout)
+            GLib.timeout_add(1000, self.timeout)
             
         except Exception:
             print("-"*60)
@@ -165,15 +170,14 @@ def main():
     logging.basicConfig(level=logging.INFO)
     
     try:
-        from dbus.mainloop.glib import DBusGMainLoop
         # Have a mainloop, so we can send/receive asynchronous calls to and from dbus
         DBusGMainLoop(set_as_default=True)
         
         logging.info('Starting Peridoc task')
         PeridocTask()
         
-        logging.info('Connected to dbus, and switching over to gobject.MainLoop() (= event based)')
-        mainloop = gobject.MainLoop()
+        logging.info('Connected to dbus, and switching over to GLib.MainLoop() (= event based)')
+        mainloop = GLib.MainLoop()
         mainloop.run()
         
     except (KeyboardInterrupt, SystemExit):
