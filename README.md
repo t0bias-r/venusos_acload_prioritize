@@ -34,4 +34,7 @@ The script controls the *Maximum inverter power* setting over DBus: **com.victro
 
 # Venus OS daemon service
 The script is running as a daemon service. 
-See [howto add a driver to Venus](https://github.com/victronenergy/venus/wiki/howto-add-a-driver-to-Venus#3-installing-a-driver) + [daemontools](https://cr.yp.to/daemontools.html)
+Detailed instructions on how to add a new daemon service can be found on Victron's website, see chapter 'Adding or modifying services':
+[Adding or modifying services](https://www.victronenergy.com/live/ccgx:root_access#adding_or_modifying_services)
+
+And here is a link to the daemon tools used. It is helpful to know their syntax: [daemontools](https://cr.yp.to/daemontools.html).
