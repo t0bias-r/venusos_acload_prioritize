@@ -1,1 +1,1 @@
-≥ Venus OS v2.80
+Venus OS v2.80 or later release
