@@ -1,7 +1,7 @@
 # Victron Venus OS: Prioritize AC load over battery charge
-Victron Venus OS addon: Prioritize AC load over battery charge in ESS mode 1 when the batteries are empty.
+Victron Venus OS addon: Prioritize AC load over over LiFePO4 charge for ESS Status Reason Code #1.
 
-The script is used in an ESS mode 1 environment where the PV power is mainly used for the AC loads (=household) and to charge the battery. The battery delivers the power for the AC loads during the night.
+The script is used in an [ESS mode 1](https://www.victronenergy.com/live/ess:ess_mode_2_and_3) environment where the PV power is mainly used for the AC loads (=household) and to charge the battery. The battery delivers the power for the AC loads during the night.
 
 On cloudy days with almost no sun, all PV power is directly needed by the AC loads.
 
@@ -14,7 +14,7 @@ When the battery is re-charged to minimum-soc + 3, ESS status #1 is deasserted a
 
 In case PV power is lees than AC load power, the battery will be discharged immediately again (with up to maximum inverter power). This results in continuous charge-discharge cycles of around 3%.
 
-In addition to the charge-discharge losses, the battery is unnecessarily loaded and  the discharge capacity is not limited.
+In addition to the charge-discharge losses, the battery is unnecessarily loaded and the discharge capacity is not limited.
 
 ## Script behaviour
 The script controls the *Maximum inverter power* setting over DBus: **com.victronenergy.settings, /Settings/CGwacs/MaxDischargePower**, see [Victron DBus](https://github.com/victronenergy/venus/wiki/dbus).
@@ -27,7 +27,7 @@ The script controls the *Maximum inverter power* setting over DBus: **com.victro
 
 
 # User settings
-1. The VenusOS setting *Maximum inverter power* is controlled by the script and can't be used anymore in the GUI.
+1. The VenusOS setting *Maximum inverter power* is controlled by the script and can't be used/set anymore in the GUI.
 2. *Minimum SOC (unless Grid fails)* shoud be set to 5% below the desired limit
 3. The maximum inverter power should be set in the Python script `self._max_discharge_power` (approx. line 34)
 
